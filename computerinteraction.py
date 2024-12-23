@@ -16,6 +16,7 @@ import logging
 import os
 import asyncio
 from datetime import datetime, timedelta
+from time_utils import TimeUtils
 
 class ComputerInteractionSystem:
     def __init__(self, config=None):
@@ -45,8 +46,8 @@ class ComputerInteractionSystem:
         
     def log_action(self, message, level="INFO"):
         """Log system actions with additional context"""
-        timestamp = time.time()
-        log_message = f"{datetime.fromtimestamp(timestamp)} - {message}"
+        timestamp = TimeUtils.get_current_time()
+        log_message = f"{TimeUtils.format_timestamp(timestamp)} - {message}"
         self.action_history.append({'timestamp': timestamp, 'action': message, 'level': level})
         
         if level == "INFO":
@@ -57,7 +58,7 @@ class ComputerInteractionSystem:
     def rate_limit(self, action_type):
         """Enforce rate limits on actions to prevent abuse"""
         action_limit = self.config['action_limits'].get(action_type, 10)
-        one_minute_ago = time.time() - 60
+        one_minute_ago = TimeUtils.get_current_time() - timedelta(minutes=1)
         recent_actions = [a for a in self.action_history if a['timestamp'] > one_minute_ago and action_type in a['action']]
         return len(recent_actions) < action_limit
 

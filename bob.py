@@ -19,6 +19,7 @@ import pyautogui
 from selenium import webdriver
 import google.generativeai as genai
 import streamlit as st
+from time_utils import TimeUtils
 
 # Configure logging
 logging.basicConfig(filename='learning_system.log', level=logging.INFO,
@@ -107,8 +108,8 @@ class Rule:
         self.strength = 1.0
         self.embedding = None
         self.confidence = confidence
-        self.creation_time = time.time()
-        self.last_used = time.time()
+        self.creation_time = TimeUtils.get_current_time()
+        self.last_used = TimeUtils.get_current_time()
         self.connections = []
         self._needs_embedding = True
 
@@ -122,11 +123,12 @@ class Rule:
 
     def increment_usage(self):
         self.usage_count += 1
-        self.last_used = time.time()
+        self.last_used = TimeUtils.get_current_time()
         self.strength *= 1.1
 
     def decay(self, current_time, decay_rate=0.1):
-        time_factor = np.exp(-decay_rate * (current_time - self.last_used))
+        time_diff = TimeUtils.get_time_diff(current_time, self.last_used)
+        time_factor = np.exp(-decay_rate * time_diff)
         self.strength *= time_factor
 
     async def _get_embedding(self) -> np.array:
@@ -363,7 +365,8 @@ class SystemState:
             'cpu_usage': 0.5,
             'memory_usage': 0.5,
             'new_rules_generated': 0,
-            'average_task_time': 1.0
+            'average_task_time': 1.0,
+            'last_update_time': TimeUtils.format_timestamp(TimeUtils.get_current_time())
         }
         self.active_rules = []
         self.pending_actions = []
@@ -414,10 +417,20 @@ class SystemState:
         }
 
     def update_time_constraints(self):
-        if self.metrics['cpu_usage'] > 0.8:
-            self.time_limits['reasoning'] = max(1.0, self.time_limits['reasoning'] - 1.0)
+        """Update time constraints based on current system state and performance"""
+        current_time = TimeUtils.get_current_time()
+        last_update = TimeUtils.parse_timestamp(self.metrics['last_update_time'])
+        time_since_update = TimeUtils.get_time_diff(current_time, last_update)
+        
+        # Adjust time limits based on system performance
+        if self.metrics['average_task_time'] < 1.0 and time_since_update < 300:  # 5 minutes
+            self.time_limits['reasoning'] = min(self.time_limits['reasoning'] * 1.1, 10.0)
+            self.time_limits['self_improvement'] = min(self.time_limits['self_improvement'] * 1.1, 20.0)
         else:
-            self.time_limits['reasoning'] = min(10.0, self.time_limits['reasoning'] + 1.0)
+            self.time_limits['reasoning'] = max(self.time_limits['reasoning'] * 0.9, 2.0)
+            self.time_limits['self_improvement'] = max(self.time_limits['self_improvement'] * 0.9, 5.0)
+        
+        self.metrics['last_update_time'] = TimeUtils.format_timestamp(current_time)
 
 # --- PatternDetectionAgent Class ---
 class PatternDetectionAgent:
@@ -776,7 +789,7 @@ class PersistentStorage:
         else:
             return nx.Graph()
 
-# --- WebInteractionAgent Class# --- WebInteractionAgent Class ---
+# --- WebInteractionAgent Class ---
 class WebInteractionAgent:
     def __init__(self, system_state):
         self.browser = ComputerInteractionSystem()
@@ -834,7 +847,6 @@ class WebInteractionAgent:
               logging.error(f"element find failed: {e}")
               return None
 
-
 # --- SelfModifier Class ---
 class SelfModifier:
     def __init__(self, utility_function):
@@ -888,129 +900,247 @@ class SelfModifier:
 class EnhancedLearningSystem:
     def __init__(self):
         configure_gemini()
-        # Initialize storage
+        
+        # Initialize core components
         self.storage = PersistentStorage()
-
+        self.error_handler = ErrorHandler()
+        self.memory_manager = MemoryManager()
+        self.knowledge_graph = EnhancedKnowledgeGraph()
+        self.learning_manager = LearningManager(self.knowledge_graph)
+        
+        # Initialize optimization and reasoning
+        self.performance_optimizer = PerformanceOptimizer()
+        self.reasoning_engine = ReasoningEngine(self.knowledge_graph, self.memory_manager)
+        
+        # Register error recovery strategies
+        self._register_error_strategies()
+        
         # Load persistent components
-        self.system_state = self.storage.load_system_state()
-        self.memory = self.storage.load_rag_memory()
-
-        # Load rules
-        self.system_state.active_rules = self.storage.load_rules()
-
-        # Initialize agents
+        try:
+            self._load_persistent_state()
+        except Exception as e:
+            self.handle_startup_error(e)
+        
+        # Initialize other components
         self.web_agent = WebInteractionAgent(self.system_state)
         self.pattern_agent = PatternDetectionAgent()
         self.rule_agent = RuleGenerationAgent()
         self.analysis_agent = AnalysisAgent()
-
-        # Initialize NoveltySeekingAlgorithm
-        self.knowledge_graph = self.storage.load_knowledge_graph()
-        self.novelty_agent = NoveltySeekingAlgorithm(self.knowledge_graph)
-        self.novelty_agent.rule_generation_agent = self.rule_agent
-        self.novelty_agent.pattern_detection_agent = self.pattern_agent
-        self.novelty_agent.computer_interaction_system = self.web_agent.browser
-        self.novelty_agent.utility_function = UtilityFunction()
-
-        # Add the persona
         self.persona = Persona()
-
-        # Initialize utility function
         self.utility_function = UtilityFunction()
         self.self_modifier = SelfModifier(self.utility_function)
 
-    def save_state(self):
-        """Save all persistent data"""
-        self.storage.save_system_state(self.system_state)
-        self.storage.save_rag_memory(self.memory)
-        self.storage.save_rules(self.system_state.active_rules)
-        self.storage.save_knowledge_graph(self.novelty_agent.knowledge_graph)
+    def _register_error_strategies(self):
+        """Register custom error recovery strategies"""
+        self.error_handler.register_recovery_strategy(
+            ErrorCategory.MEMORY,
+            ErrorSeverity.HIGH,
+            self._handle_memory_overflow
+        )
+        self.error_handler.register_recovery_strategy(
+            ErrorCategory.LEARNING,
+            ErrorSeverity.MEDIUM,
+            self._handle_learning_error
+        )
+        self.error_handler.register_recovery_strategy(
+            ErrorCategory.KNOWLEDGE,
+            ErrorSeverity.HIGH,
+            self._handle_knowledge_error
+        )
 
-    async def process_task(self, task: str) -> Dict:
+    async def _handle_memory_overflow(self, context):
+        """Handle memory overflow errors"""
+        await self.memory_manager.forget_old_memories()
+        await self.memory_manager.consolidate_memories()
+        return {'status': 'recovered', 'action': 'memory_cleanup'}
+
+    async def _handle_learning_error(self, context):
+        """Handle learning-related errors"""
+        await self.learning_manager.consolidate_knowledge()
+        return {'status': 'recovered', 'action': 'knowledge_consolidation'}
+
+    async def _handle_knowledge_error(self, context):
+        """Handle knowledge graph errors"""
+        self.knowledge_graph.prune_weak_relationships()
+        return {'status': 'recovered', 'action': 'graph_pruning'}
+
+    async def process_task(self, task: str):
+        """Process a task with enhanced optimization and reasoning"""
         try:
-            # Add task to memory
-            self.memory.add_memory({'content': task})
-
-            # Update current task in system state
-            self.system_state.current_task = task
-            self.system_state.past_interactions.append({
-                'timestamp': time.time(),
-                'task': task
-            })
-            self.system_state.metrics['total_tasks'] += 1
-            
-            # Interact with the webpage if needed
-            if await self.web_agent.interact_with_webpage(task):
-                self.system_state.metrics['completed_tasks'] += 1 # consider webpage actions a task completion
-            else:
-                # Use the novelty agent to apply rules
-                await self.novelty_agent.apply_rules(task)
-
-                # Detect patterns in the task
-                patterns = await self.pattern_agent.detect_patterns({'task': task}, time_limit=self.system_state.time_limits['reasoning'])
-
-                # Generate new rules based on patterns
-                new_rules = await self.rule_agent.generate_rules(patterns, time_limit=self.system_state.time_limits['reasoning'])
-                self.system_state.active_rules.extend(new_rules)
-                self.system_state.metrics['new_rules_generated'] += len(new_rules)
-
-                # Analyze system state
-                analysis = await self.analysis_agent.analyze_state(self.system_state.get_summary(), time_limit=self.system_state.time_limits['reasoning'])
-
-                # Update system metrics
-                self.system_state.update({'metrics': analysis.get('key_metrics', {})})
-                
-            # Save state after processing
-            self.save_state()
-
-            # Base response from Alice's processing
-            base_response = f"I have processed the task '{task}'."
-            response = self.persona.generate_response(base_response, self.system_state)
-
-
-            # Update average task time
-            task_time = time.time() - self.system_state.past_interactions[-1]['timestamp']
-            previous_avg_time = self.system_state.metrics.get('average_task_time', 1.0)
-            self.system_state.metrics['average_task_time'] = (previous_avg_time + task_time) / 2
-
-            # Consider self-improvement
-            await self.self_improve()
-
-            return {
-                'status': 'success',
-                'response': response,
+            # Create task context
+            task_context = {
+                'content': task,
+                'timestamp': TimeUtils.format_timestamp(TimeUtils.get_current_time()),
                 'system_state': self.system_state.get_summary()
             }
+            
+            # Optimize task processing
+            async def optimized_task():
+                # Create memory of the task
+                task_memory = await self.memory_manager.add_memory(
+                    content=task,
+                    context={'type': 'task', 'timestamp': TimeUtils.format_timestamp(TimeUtils.get_current_time())}
+                )
 
+                # Perform initial reasoning
+                reasoning_result = await self.reasoning_engine.reason({
+                    'premises': [task],
+                    'goals': ['understand_task', 'identify_approach'],
+                    'constraints': self.system_state.time_limits
+                })
+
+                # Create interaction data for learning
+                interaction_data = {
+                    'content': task,
+                    'context': {
+                        'system_state': self.system_state.get_summary(),
+                        'memory_id': task_memory,
+                        'reasoning': reasoning_result.conclusion,
+                        'timestamp': TimeUtils.format_timestamp(TimeUtils.get_current_time())
+                    }
+                }
+
+                # Learn from the interaction
+                await self.learning_manager.learn_from_interaction(interaction_data)
+                
+                # Get adaptive learning rate
+                learning_rate = await self.learning_manager.adaptive_learning_rate()
+                
+                # Process task with reasoning-guided approach
+                result = await self._process_task_with_reasoning(
+                    task, 
+                    reasoning_result
+                )
+                
+                # Consolidate knowledge if needed
+                if self.should_consolidate_knowledge():
+                    await self.learning_manager.consolidate_knowledge()
+                    
+                # Generate and log insights
+                insights = await self.learning_manager.generate_insights()
+                if insights:
+                    logging.info(f"Generated insights: {insights}")
+                    
+                # Update memory with task result
+                await self.memory_manager.add_memory(
+                    content=result,
+                    context={
+                        'type': 'task_result',
+                        'task_id': task_memory,
+                        'reasoning': reasoning_result.conclusion,
+                        'timestamp': TimeUtils.format_timestamp(TimeUtils.get_current_time())
+                    }
+                )
+                
+                return result
+
+            # Execute optimized task
+            result = await self.performance_optimizer.optimize_task(
+                optimized_task
+            )
+            
+            return result
+            
         except Exception as e:
-            logging.error(f"Task processing failed: {str(e)}")
-            return {'status': 'error', 'message': str(e)}
-
-    async def self_improve(self):
-        if self.self_modifier.should_modify_logic(self.system_state):
-            # Generate new code
-            task_description = "optimize the rule execution process to be faster"
-            new_code = self.self_modifier.generate_new_code(task_description)
-            if self.self_modifier.is_valid_code(new_code):
-                # Verify the modification with a time limit
-                verifier = FormalVerifier(self.utility_function)
-                if verifier.verify_modification(new_code, self.system_state, time_limit=5.0):
-                    # Apply modification with a time limit
-                    await asyncio.wait_for(
-                        self.apply_modification(new_code),
-                        timeout=2.0
-                    )
-                    logging.info("Self-improvement applied successfully.")
-                else:
-                    logging.warning("Modification rejected during verification.")
+            # Handle any errors that occur during task processing
+            recovery_result = await self.error_handler.handle_error(
+                error=e,
+                category=ErrorCategory.SYSTEM,
+                system_state=self.system_state.get_summary()
+            )
+            
+            if recovery_result:
+                logging.info(f"Recovered from error: {str(e)}")
+                return await self.process_task(task)  # Retry task
             else:
-                logging.error("Generated code is invalid.")
-        else:
-            logging.info("No modification necessary at this time.")
+                logging.error(f"Failed to recover from error: {str(e)}")
+                raise
 
-    async def apply_modification(self, code_str):
-        # Apply the code modification
-        self.self_modifier.modify_logic('NoveltySeekingAlgorithm', 'NoveltySeekingAlgorithm', code_str)
+    async def _process_task_with_reasoning(self, task: str, initial_reasoning: ReasoningResult):
+        """Process task using reasoning-guided approach"""
+        # Update system state
+        self.system_state.current_task = task
+        self.system_state.metrics['total_tasks'] += 1
+        
+        try:
+            # Determine approach based on reasoning
+            if 'web_interaction' in initial_reasoning.conclusion.lower():
+                # Web interaction approach
+                if await self.web_agent.interact_with_webpage(task):
+                    self.system_state.metrics['completed_tasks'] += 1
+                    return {'status': 'success', 'type': 'web_interaction'}
+            
+            # Pattern detection with reasoning
+            pattern_context = {
+                'premises': [task, initial_reasoning.conclusion],
+                'goals': ['identify_patterns'],
+                'constraints': self.system_state.time_limits
+            }
+            pattern_reasoning = await self.reasoning_engine.reason(pattern_context)
+            
+            patterns = await self.pattern_agent.detect_patterns(
+                {'task': task, 'reasoning': pattern_reasoning.conclusion},
+                time_limit=self.system_state.time_limits['reasoning']
+            )
+            
+            # Rule generation with reasoning
+            rule_context = {
+                'premises': patterns + [pattern_reasoning.conclusion],
+                'goals': ['generate_rules'],
+                'constraints': self.system_state.time_limits
+            }
+            rule_reasoning = await self.reasoning_engine.reason(rule_context)
+            
+            new_rules = await self.rule_agent.generate_rules(
+                patterns + [rule_reasoning.conclusion],
+                time_limit=self.system_state.time_limits['reasoning']
+            )
+            
+            # Update system state
+            self.system_state.active_rules.extend(new_rules)
+            self.system_state.metrics['new_rules_generated'] += len(new_rules)
+            
+            # Analyze state with reasoning
+            analysis_context = {
+                'premises': [self.system_state.get_summary()],
+                'goals': ['analyze_state'],
+                'constraints': self.system_state.time_limits
+            }
+            analysis_reasoning = await self.reasoning_engine.reason(analysis_context)
+            
+            analysis = await self.analysis_agent.analyze_state(
+                {**self.system_state.get_summary(), 'reasoning': analysis_reasoning.conclusion},
+                time_limit=self.system_state.time_limits['reasoning']
+            )
+            
+            # Update metrics
+            self.system_state.update({'metrics': analysis.get('key_metrics', {})})
+            
+            return {
+                'status': 'success',
+                'patterns': patterns,
+                'new_rules': len(new_rules),
+                'analysis': analysis,
+                'reasoning': {
+                    'initial': initial_reasoning.conclusion,
+                    'pattern': pattern_reasoning.conclusion,
+                    'rule': rule_reasoning.conclusion,
+                    'analysis': analysis_reasoning.conclusion
+                }
+            }
+            
+        except Exception as e:
+            raise Exception(f"Task processing failed: {str(e)}")
+
+    def get_system_stats(self) -> Dict[str, Any]:
+        """Get comprehensive system statistics"""
+        return {
+            'performance': self.performance_optimizer.get_optimization_stats(),
+            'reasoning': self.reasoning_engine.get_reasoning_stats(),
+            'memory': self.memory_manager.get_memory_stats(),
+            'learning': self.learning_manager.get_learning_statistics(),
+            'errors': self.error_handler.get_error_statistics()
+        }
 
 # --- Streamlit Interface ---
 def create_interface():
