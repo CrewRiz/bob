@@ -1,0 +1,14 @@
+{
+    "internal_model": [
+        "Rule 1: what is the weather for livingston, tx?"
+    ],
+    "complexity": 5,
+    "novelty": 1,
+    "pattern_map": {},
+    "knowledge_graph": {
+        "directed": true,
+        "multigraph": false,
+        "graph": {},
+        "nodes": [
+            {
+                "data": 
